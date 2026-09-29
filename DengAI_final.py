@@ -1,0 +1,243 @@
+# %% [markdown]
+# # DengAI: Predicting Weekly Dengue Cases
+#
+# Predict weekly dengue cases in San Juan (`sj`) and Iquitos (`iq`) from weather data, so health teams can prepare early.
+# Metric: **MAE** (average number of cases we are off per week).
+
+# %%
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from matplotlib import pyplot as plt
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import mean_absolute_error
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+sns.set()
+
+train = pd.read_csv("data/dengue_features_train.csv", parse_dates=["week_start_date"]).merge(
+        pd.read_csv("data/dengue_labels_train.csv"), on=["city", "year", "weekofyear"])
+test = pd.read_csv("data/dengue_features_test.csv", parse_dates=["week_start_date"])
+WEATHER = [c for c in train.columns if c.startswith(("ndvi", "precip", "reanalysis", "station"))]
+
+# %% [markdown]
+# ## 1. Exploratory Data Analysis
+#
+# ### 1.1 Cases over time
+
+# %%
+fig, axes = plt.subplots(2, 2, figsize=(15, 7))
+for i, city in enumerate(["sj", "iq"]):
+    df = train[train.city == city]
+    sns.lineplot(data=df, x="week_start_date", y="total_cases", ax=axes[i, 0]).set_title(f"{city}: cases over time")
+    sns.lineplot(data=df, x="weekofyear", y="total_cases", estimator="median", ax=axes[i, 1]).set_title(f"{city}: median cases by week")
+plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# Cases are seasonal with a few big outbreaks, and the cities are very different (San Juan has far more cases and a different peak week), so we train **one model per city** and give the model the week of the year as `sin`/`cos` features.
+#
+# ### 1.2 Missing values
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+for ax, (city, df) in zip(axes, train.groupby("city")):
+    sns.heatmap(df[WEATHER].isna().T.astype(int), cbar=False, yticklabels=True, ax=ax)
+    ax.set_title(f"{city}: missing values (light = missing)"); ax.set_xticks([])
+plt.tight_layout(); plt.show()
+
+print("Max difference between the two precipitation columns:",
+      (train["precipitation_amt_mm"] - train["reanalysis_sat_precip_amt_mm"]).abs().max())
+
+# %% [markdown]
+# Gaps are short and scattered (the longest is 15 weeks, mostly `ndvi_ne` in San Juan), and weather changes slowly, so we **fill each gap with the previous week's value**.
+# `reanalysis_sat_precip_amt_mm` is an exact copy of `precipitation_amt_mm`, so we **drop it**.
+#
+# ### 1.3 Correlation with cases
+# The **bold** features are the ones we average over past weeks in preprocessing (`KEY`).
+
+# %%
+KEY = [
+    "station_avg_temp_c",
+    "reanalysis_specific_humidity_g_per_kg",
+    "reanalysis_dew_point_temp_k",
+    "reanalysis_min_air_temp_k",
+    # "station_min_temp_c",
+    "precipitation_amt_mm"
+]
+
+corr = pd.DataFrame({city: df[WEATHER + ["total_cases"]].corr()["total_cases"].drop("total_cases")
+                     for city, df in train.groupby("city")})
+corr = corr.loc[corr.abs().mean(axis=1).sort_values().index]
+ax = corr.plot.barh(figsize=(8, 8), title="Correlation with total_cases (same week)")
+for label in ax.get_yticklabels():
+    label.set_fontweight("bold" if label.get_text() in KEY else "normal")
+plt.show()
+
+# %% [markdown]
+# Humidity, dew point and minimum temperature are the top three features in both cities, and average temperature is among the strongest in San Juan, so those are in `KEY`.
+# Precipitation is weak in the same week, but it is how mosquitoes get standing water to breed in, so its effect should show up weeks later.
+#
+# ### 1.4 Why windowed features
+# Correlation of cases with the average of each `KEY` feature over the last *w* weeks (*w* = 1 is the raw weekly value).
+
+# %%
+windows = range(1, 17)
+fig, axes = plt.subplots(1, 2, figsize=(15, 4), sharey=True)
+for ax, (city, df) in zip(axes, train.groupby("city")):
+    for c in KEY:
+        x = df[c].ffill()
+        ax.plot(windows, [df["total_cases"].corr(x.rolling(w, min_periods=1).mean()) for w in windows], marker="o", label=c)
+    for w in [4, 8, 12]:
+        ax.axvline(w, color="grey", ls=":")
+    ax.set(title=f"{city}: correlation of the w-week average with cases", xlabel="window w (weeks)")
+axes[0].set_ylabel("correlation with total_cases"); axes[1].legend(fontsize=8)
+plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# Averaging over past weeks makes every `KEY` feature more predictive: in San Juan the correlation keeps rising up to 12–16 weeks (average temperature goes from 0.19 to 0.37 at 12 weeks), in Iquitos it peaks at 4–8 weeks, and precipitation goes from 0.06 to 0.16 in San Juan and from 0.09 to 0.16 in Iquitos.
+# This fits the biology: mosquitoes take weeks to breed and the virus takes time to incubate, so the last few weeks of weather matter more than this week's.
+# **4, 8 and 12-week averages** cover the best windows of both cities.
+#
+# ### 1.5 Cases per season
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+for ax, (city, df) in zip(axes, train.groupby("city")):
+    season = np.arange(len(df)) // 52
+    med = df["total_cases"].groupby(season.tolist()).median()
+    med.index = df["week_start_date"].iloc[::52].dt.year.values[:len(med)]
+    med.plot.bar(ax=ax, title=f"{city}: median weekly cases per season")
+plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# The level changes a lot from season to season: San Juan's 1990s seasons run 2–3 times higher than its 2000s, and Iquitos reports almost no cases in its first seasons.
+# Weeks inside a season move together, so we **validate on whole seasons, always later than the training data** (section 3), and Iquitos gets at least 5 training seasons before its first fold.
+#
+# ## 2. Preprocessing
+# - Fill missing values with the previous week's value (1.2).
+# - Drop the duplicate precipitation column (1.2).
+# - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
+# - Add the average of the `KEY` features over the last 4, 8 and 12 weeks (1.3, 1.4).
+
+# %%
+train["part"], test["part"] = "train", "test"
+data = pd.concat([train, test]).drop(columns="reanalysis_sat_precip_amt_mm")
+data = data.sort_values(["city", "week_start_date"]).reset_index(drop=True)
+
+WEATHER.remove("reanalysis_sat_precip_amt_mm")
+data[WEATHER] = data.groupby("city")[WEATHER].ffill()
+
+data["woy_sin"] = np.sin(2 * np.pi * data["weekofyear"] / 52)
+data["woy_cos"] = np.cos(2 * np.pi * data["weekofyear"] / 52)
+
+for w in [4, 8, 12]:
+    for c in KEY:
+        data[f"{c}_{w}w"] = data.groupby("city")[c].transform(lambda s: s.rolling(w, min_periods=1).mean())
+
+FEATURES = [c for c in data.columns if c not in ["city", "year", "weekofyear", "week_start_date", "total_cases", "part"]]
+print(len(FEATURES), "features")
+
+# %% [markdown]
+# ## 3. Validation
+# - **Outer loop (scoring):** for each season *s*, train on all earlier seasons and predict *s*. San Juan starts at season 8 (10 folds), Iquitos at season 5 (5 folds; its first years have almost no cases).
+# - **Inner loop (tuning):** `GridSearchCV` inside each outer training set, validating on its last 2 seasons the same way.
+
+# %%
+MIN_TRAIN = {"sj": 8, "iq": 5}
+
+def season_folds(n_rows, first):
+    # Expanding window: for each season s >= first, train on all seasons before s, validate on s
+    season = np.arange(n_rows) // 52
+    for s in range(first, season.max() + 1):
+        yield np.where(season < s)[0], np.where(season == s)[0]
+
+# %% [markdown]
+# ## 4. Model choosing
+# Three models, each tuned in the inner loop and scored on every outer season:
+# - **Ridge** (linear baseline)
+# - **Random Forest**
+# - **XGBoost** (gradient boosting, optimising MAE directly)
+
+# %%
+MODELS = {
+    "Ridge": (make_pipeline(StandardScaler(), Ridge()),
+              {"ridge__alpha": [1, 10, 100, 1000, 10000]}),
+    "Random Forest": (RandomForestRegressor(n_estimators=200, random_state=42),
+                      {"max_depth": [3, 5, None], "min_samples_leaf": [1, 5, 20]}),
+    "XGBoost": (XGBRegressor(objective="reg:absoluteerror", learning_rate=0.05, random_state=42),
+                {"max_depth": [2, 3, 4], "n_estimators": [100, 300]}),
+}
+
+rows = []
+for city in ["sj", "iq"]:
+    d = data[(data.city == city) & (data.part == "train")]
+    for train_idx, val_idx in season_folds(len(d), MIN_TRAIN[city]):
+        tr, va = d.iloc[train_idx], d.iloc[val_idx]
+        inner = list(season_folds(len(tr), len(tr) // 52 - 2))
+        for name, (model, grid) in MODELS.items():
+            gs = GridSearchCV(model, grid, cv=inner, scoring="neg_mean_absolute_error")
+            gs.fit(tr[FEATURES], tr["total_cases"])
+            pred = gs.predict(va[FEATURES]).clip(0)
+            rows.append({"city": city, "season": va["week_start_date"].iloc[0].year, "model": name,
+                         "MAE": mean_absolute_error(va["total_cases"], pred)})
+
+scores = pd.DataFrame(rows).pivot_table(index=["city", "season"], columns="model", values="MAE")
+scores.round(1)
+
+# %% [markdown]
+# ## 5. Results
+# One MAE per model per season. Outbreak seasons dominate the mean, so also look at the standard error and at how many seasons each model wins.
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+for ax, city in zip(axes, ["sj", "iq"]):
+    scores.loc[city].plot.bar(ax=ax, title=f"{city}: MAE per validation season")
+plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# **Model choice table.** `gap vs best` is how many more cases per week a model is off than the best model, averaged over the same seasons (± its std err).
+# A gap smaller than its std err is noise, so that model is a **tie** with the best one.
+
+# %%
+table = []
+for city, s in scores.groupby("city"):
+    best = s.mean().idxmin()
+    gap = s.sub(s[best], axis=0)              # extra error vs the best model, season by season
+    wins = s.idxmin(axis=1).value_counts()
+    for m in s.columns:
+        table.append({"city": city, "model": m, "mean MAE": s[m].mean(), "std err": s[m].sem(),
+                      "seasons won": f"{wins.get(m, 0)}/{len(s)}",
+                      "gap vs best": f"{gap[m].mean():+.1f} ± {gap[m].sem():.1f}",
+                      "verdict": "best" if m == best else "tie" if gap[m].mean() <= gap[m].sem() else "worse"})
+choice = pd.DataFrame(table).set_index(["city", "model"]).sort_values(["city", "mean MAE"])
+choice.round(2)
+
+# %% [markdown]
+# Pick, per city, the model with the lowest mean MAE that also wins most seasons.
+
+# %%
+FINAL = {"sj": "XGBoost", "iq": "XGBoost"}  # set from the table above
+
+# %% [markdown]
+# ## 6. Training (final model)
+# Tune the chosen model on all training seasons with the same season folds, refit on everything and predict the competition test set.
+
+# %%
+parts = []
+for city in ["sj", "iq"]:
+    d_train = data[(data.city == city) & (data.part == "train")]
+    d_test = data[(data.city == city) & (data.part == "test")]
+    model, grid = MODELS[FINAL[city]]
+    gs = GridSearchCV(model, grid, cv=list(season_folds(len(d_train), MIN_TRAIN[city])), scoring="neg_mean_absolute_error")
+    gs.fit(d_train[FEATURES], d_train["total_cases"])
+    parts.append(d_test[["city", "year", "weekofyear"]].assign(
+        total_cases=np.round(gs.predict(d_test[FEATURES]).clip(0)).astype(int)))
+
+submission = pd.concat(parts)
+submission.to_csv("submission.csv", index=False)
+submission.groupby("city").total_cases.describe()
+
+# %%
