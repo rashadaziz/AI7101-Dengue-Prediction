@@ -121,6 +121,7 @@ plt.tight_layout(); plt.show()
 # - Drop the duplicate precipitation column (1.2).
 # - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
 # - Add the average of the `KEY` features over the last 4, 8 and 12 weeks (1.3, 1.4).
+# - Split into inputs `X` (all weather and season features) and output `y` (`total_cases`).
 
 # %%
 train["part"], test["part"] = "train", "test"
@@ -138,6 +139,8 @@ for w in [4, 8, 12]:
         data[f"{c}_{w}w"] = data.groupby("city")[c].transform(lambda s: s.rolling(w, min_periods=1).mean())
 
 FEATURES = [c for c in data.columns if c not in ["city", "year", "weekofyear", "week_start_date", "total_cases", "part"]]
+X = data[FEATURES]          # inputs
+y = data["total_cases"]     # output (NaN for test rows)
 print(len(FEATURES), "features")
 
 # %% [markdown]
@@ -176,13 +179,15 @@ for city in ["sj", "iq"]:
     d = data[(data.city == city) & (data.part == "train")]
     for train_idx, val_idx in season_folds(len(d), MIN_TRAIN[city]):
         tr, va = d.iloc[train_idx], d.iloc[val_idx]
+        X_tr, y_tr = X.loc[tr.index], y.loc[tr.index]
+        X_va, y_va = X.loc[va.index], y.loc[va.index]
         inner = list(season_folds(len(tr), len(tr) // 52 - 2))
         for name, (model, grid) in MODELS.items():
             gs = GridSearchCV(model, grid, cv=inner, scoring="neg_mean_absolute_error")
-            gs.fit(tr[FEATURES], tr["total_cases"])
-            pred = gs.predict(va[FEATURES]).clip(0)
+            gs.fit(X_tr, y_tr)
+            pred = gs.predict(X_va).clip(0)
             rows.append({"city": city, "season": va["week_start_date"].iloc[0].year, "model": name,
-                         "MAE": mean_absolute_error(va["total_cases"], pred)})
+                        "MAE": mean_absolute_error(y_va, pred)})
 
 scores = pd.DataFrame(rows).pivot_table(index=["city", "season"], columns="model", values="MAE")
 scores.round(1)
@@ -232,9 +237,9 @@ for city in ["sj", "iq"]:
     d_test = data[(data.city == city) & (data.part == "test")]
     model, grid = MODELS[FINAL[city]]
     gs = GridSearchCV(model, grid, cv=list(season_folds(len(d_train), MIN_TRAIN[city])), scoring="neg_mean_absolute_error")
-    gs.fit(d_train[FEATURES], d_train["total_cases"])
+    gs.fit(X.loc[d_train.index], y.loc[d_train.index])
     parts.append(d_test[["city", "year", "weekofyear"]].assign(
-        total_cases=np.round(gs.predict(d_test[FEATURES]).clip(0)).astype(int)))
+        total_cases=np.round(gs.predict(X.loc[d_test.index]).clip(0)).astype(int)))
 
 submission = pd.concat(parts)
 submission.to_csv("submission.csv", index=False)
