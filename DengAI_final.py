@@ -193,10 +193,11 @@ def season_folds(n_rows, first):
 
 # %% [markdown]
 # ## 4. Model choosing
-# Three models, each tuned in the inner loop and scored on every outer season:
-# - **Ridge** (linear baseline)
+# Three models plus a baseline, each scored on every outer season (the models are tuned in the inner loop):
+# - **Ridge** (simple linear model)
 # - **Random Forest**
 # - **XGBoost** (gradient boosting, optimising MAE directly)
+# - **Baseline**: median cases of the same week of the year in the training seasons (no weather). A model is only useful if it beats this.
 
 # %%
 MODELS = {
@@ -216,6 +217,11 @@ for city in ["sj", "iq"]:
         X_tr, y_tr = X.loc[tr.index], y.loc[tr.index]
         X_va, y_va = X.loc[va.index], y.loc[va.index]
         inner = list(season_folds(len(tr), len(tr) // 52 - 2))
+        # Baseline: median cases of the same week in past seasons, no weather
+        wk_median = tr.groupby("weekofyear")["total_cases"].median()
+        base = va["weekofyear"].map(wk_median).fillna(y_tr.median())
+        rows.append({"city": city, "season": va["week_start_date"].iloc[0].year, "model": "Baseline",
+                     "MAE": mean_absolute_error(y_va, base)})
         for name, (model, grid) in MODELS.items():
             gs = GridSearchCV(model, grid, cv=inner, scoring="neg_mean_absolute_error")
             gs.fit(X_tr, y_tr)
@@ -255,7 +261,7 @@ choice = pd.DataFrame(table).set_index(["city", "model"]).sort_values(["city", "
 choice.round(2)
 
 # %% [markdown]
-# Pick, per city, the model with the lowest mean MAE that also wins most seasons.
+# XGBoost is the best ML model in both cities, but it only ties with the seasonal baseline (sj 20.1 vs 19.8, iq 6.0 vs 6.2): most of the predictable signal is seasonality, and weather helps mainly in some outbreak seasons (e.g. sj 2005: 17.9 vs 23.5). We keep XGBoost as the final model.
 
 # %%
 FINAL = {"sj": "XGBoost", "iq": "XGBoost"}  # set from the table above
