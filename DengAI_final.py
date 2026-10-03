@@ -138,7 +138,7 @@ plt.tight_layout(); plt.show()
 # ### 1.6 Target distribution
 
 # %%
-sns.displot(train, x="total_cases", col="city", bins=50, height=4, aspect=1.6,
+sns.displot(train, x="total_cases", col="city", bins=50, height=4, aspect=1.6, common_bins=False,
             facet_kws={"sharex": False, "sharey": False})
 plt.show()
 
