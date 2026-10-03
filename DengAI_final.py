@@ -209,7 +209,7 @@ MODELS = {
                 {"max_depth": [2, 3, 4], "n_estimators": [100, 300]}),
 }
 
-rows = []
+rows, preds = [], []
 for city in ["sj", "iq"]:
     d = data[(data.city == city) & (data.part == "train")]
     for train_idx, val_idx in season_folds(len(d), MIN_TRAIN[city]):
@@ -222,12 +222,14 @@ for city in ["sj", "iq"]:
         base = va["weekofyear"].map(wk_median).fillna(y_tr.median())
         rows.append({"city": city, "season": va["week_start_date"].iloc[0].year, "model": "Baseline",
                      "MAE": mean_absolute_error(y_va, base)})
+        preds.append(va[["city", "week_start_date", "total_cases"]].assign(model="Baseline", pred=base))
         for name, (model, grid) in MODELS.items():
             gs = GridSearchCV(model, grid, cv=inner, scoring="neg_mean_absolute_error")
             gs.fit(X_tr, y_tr)
             pred = gs.predict(X_va).clip(0)
             rows.append({"city": city, "season": va["week_start_date"].iloc[0].year, "model": name,
                         "MAE": mean_absolute_error(y_va, pred)})
+            preds.append(va[["city", "week_start_date", "total_cases"]].assign(model=name, pred=pred))
 
 scores = pd.DataFrame(rows).pivot_table(index=["city", "season"], columns="model", values="MAE")
 scores.round(1)
@@ -265,6 +267,24 @@ choice.round(2)
 
 # %%
 FINAL = {"sj": "XGBoost", "iq": "XGBoost"}  # set from the table above
+
+# %% [markdown]
+# **Predicted vs actual.** Out-of-fold predictions of the final model and the baseline on every validation season.
+
+# %%
+p = pd.concat(preds)
+fig, axes = plt.subplots(2, 1, figsize=(15, 8))
+for ax, city in zip(axes, ["sj", "iq"]):
+    d = p[p.city == city]
+    sns.lineplot(data=d[d.model == "Baseline"], x="week_start_date", y="total_cases", label="actual", color="black", ax=ax)
+    for m in [FINAL[city], "Baseline"]:
+        sns.lineplot(data=d[d.model == m], x="week_start_date", y="pred", label=m, ax=ax)
+    ax.set_title(f"{city}: actual vs predicted cases (validation seasons)")
+plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# In normal seasons XGBoost follows the timing of the cases, but it never predicts outbreaks: its highest San Juan prediction is about 70 cases, while the real peaks were 329 (1998), 137 (2005) and 170 (2007), and in Iquitos it predicts about 10 when the peaks were 58 and 63.
+# The baseline has the same ceiling, which is why the two tie: weather tells the model *when* the season comes, not *how big* it will be.
 
 # %% [markdown]
 # ## 6. Training (final model)
