@@ -8,6 +8,7 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
 from matplotlib import pyplot as plt
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import mean_absolute_error
@@ -16,11 +17,15 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
+
 sns.set()
 
+# %%
 train = pd.read_csv("data/dengue_features_train.csv", parse_dates=["week_start_date"]).merge(
         pd.read_csv("data/dengue_labels_train.csv"), on=["city", "year", "weekofyear"])
+
 test = pd.read_csv("data/dengue_features_test.csv", parse_dates=["week_start_date"])
+
 WEATHER = [c for c in train.columns if c.startswith(("ndvi", "precip", "reanalysis", "station"))]
 
 # %% [markdown]
@@ -30,23 +35,30 @@ WEATHER = [c for c in train.columns if c.startswith(("ndvi", "precip", "reanalys
 
 # %%
 fig, axes = plt.subplots(2, 2, figsize=(15, 7))
+
 for i, city in enumerate(["sj", "iq"]):
     df = train[train.city == city]
     sns.lineplot(data=df, x="week_start_date", y="total_cases", ax=axes[i, 0]).set_title(f"{city}: cases over time")
     sns.lineplot(data=df, x="weekofyear", y="total_cases", estimator="median", ax=axes[i, 1]).set_title(f"{city}: median cases by week")
-plt.tight_layout(); plt.show()
+
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # Cases are seasonal with a few big outbreaks, and the cities are very different (San Juan has far more cases and a different peak week), so we train **one model per city** and give the model the week of the year as `sin`/`cos` features.
-#
+
+# %% [markdown]
 # ### 1.2 Missing values
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+
 for ax, (city, df) in zip(axes, train.groupby("city")):
     sns.heatmap(df[WEATHER].isna().T.astype(int), cbar=False, yticklabels=True, ax=ax)
     ax.set_title(f"{city}: missing values (light = missing)"); ax.set_xticks([])
-plt.tight_layout(); plt.show()
+
+plt.tight_layout()
+plt.show()
 
 print("Max difference between the two precipitation columns:",
       (train["precipitation_amt_mm"] - train["reanalysis_sat_precip_amt_mm"]).abs().max())
@@ -54,7 +66,8 @@ print("Max difference between the two precipitation columns:",
 # %% [markdown]
 # Gaps are short and scattered (the longest is 15 weeks, mostly `ndvi_ne` in San Juan), and weather changes slowly, so we **fill each gap with the previous week's value**.
 # `reanalysis_sat_precip_amt_mm` is an exact copy of `precipitation_amt_mm`, so we **drop it**.
-#
+
+# %% [markdown]
 # ### 1.3 Correlation with cases
 # The **bold** features are the ones we average over past weeks in preprocessing (`KEY`).
 
@@ -64,22 +77,24 @@ KEY = [
     "reanalysis_specific_humidity_g_per_kg",
     "reanalysis_dew_point_temp_k",
     "reanalysis_min_air_temp_k",
-    # "station_min_temp_c",
     "precipitation_amt_mm"
 ]
 
 corr = pd.DataFrame({city: df[WEATHER + ["total_cases"]].corr()["total_cases"].drop("total_cases")
                      for city, df in train.groupby("city")})
+
 corr = corr.loc[corr.abs().mean(axis=1).sort_values().index]
 ax = corr.plot.barh(figsize=(8, 8), title="Correlation with total_cases (same week)")
 for label in ax.get_yticklabels():
     label.set_fontweight("bold" if label.get_text() in KEY else "normal")
+
 plt.show()
 
 # %% [markdown]
 # Humidity, dew point and minimum temperature are the top three features in both cities, and average temperature is among the strongest in San Juan, so those are in `KEY`.
 # Precipitation is weak in the same week, but it is how mosquitoes get standing water to breed in, so its effect should show up weeks later.
-#
+
+# %% [markdown]
 # ### 1.4 Why windowed features
 # Correlation of cases with the average of each `KEY` feature over the last *w* weeks (*w* = 1 is the raw weekly value).
 
@@ -100,22 +115,26 @@ plt.tight_layout(); plt.show()
 # Averaging over past weeks makes every `KEY` feature more predictive: in San Juan the correlation keeps rising up to 12–16 weeks (average temperature goes from 0.19 to 0.37 at 12 weeks), in Iquitos it peaks at 4–8 weeks, and precipitation goes from 0.06 to 0.16 in San Juan and from 0.09 to 0.16 in Iquitos.
 # This fits the biology: mosquitoes take weeks to breed and the virus takes time to incubate, so the last few weeks of weather matter more than this week's.
 # **4, 8 and 12-week averages** cover the best windows of both cities.
-#
+
+# %% [markdown]
 # ### 1.5 Cases per season
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+
 for ax, (city, df) in zip(axes, train.groupby("city")):
     season = np.arange(len(df)) // 52
     med = df["total_cases"].groupby(season.tolist()).median()
     med.index = df["week_start_date"].iloc[::52].dt.year.values[:len(med)]
     med.plot.bar(ax=ax, title=f"{city}: median weekly cases per season")
+
 plt.tight_layout(); plt.show()
 
 # %% [markdown]
 # The level changes a lot from season to season: San Juan's 1990s seasons run 2–3 times higher than its 2000s, and Iquitos reports almost no cases in its first seasons.
 # Weeks inside a season move together, so we **validate on whole seasons, always later than the training data** (section 3), and Iquitos gets at least 5 training seasons before its first fold.
-#
+
+# %% [markdown]
 # ## 2. Preprocessing
 # - Fill missing values with the previous week's value (1.2).
 # - Drop the duplicate precipitation column (1.2).
@@ -232,12 +251,16 @@ FINAL = {"sj": "XGBoost", "iq": "XGBoost"}  # set from the table above
 
 # %%
 parts = []
+city_model = {}
 for city in ["sj", "iq"]:
     d_train = data[(data.city == city) & (data.part == "train")]
     d_test = data[(data.city == city) & (data.part == "test")]
+
     model, grid = MODELS[FINAL[city]]
     gs = GridSearchCV(model, grid, cv=list(season_folds(len(d_train), MIN_TRAIN[city])), scoring="neg_mean_absolute_error")
     gs.fit(X.loc[d_train.index], y.loc[d_train.index])
+
+    city_model[city] = gs.best_estimator_
     parts.append(d_test[["city", "year", "weekofyear"]].assign(
         total_cases=np.round(gs.predict(X.loc[d_test.index]).clip(0)).astype(int)))
 
@@ -245,4 +268,42 @@ submission = pd.concat(parts)
 submission.to_csv("submission.csv", index=False)
 submission.groupby("city").total_cases.describe()
 
+# %% [markdown]
+# ## 7. Post analysis
+
 # %%
+cities = ["sj", "iq"]
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+for ax, city in zip(axes, cities):
+    estimator = city_model[city]
+    importances = estimator.feature_importances_
+
+    imp_df = pd.DataFrame({"Feature": FEATURES, "Importance": importances})
+
+    imp_df = imp_df.reindex(
+        imp_df.Importance.abs().sort_values(ascending=False).index
+    )
+
+    sns.barplot(
+        data=imp_df,
+        x="Importance",
+        y="Feature",
+        hue="Feature",
+        palette="viridis",
+        legend=False,
+        ax=ax,
+    )
+    ax.set_title(f"{city.upper()} Best Model Feature Importances")
+    ax.set_xlabel("Importance")
+    ax.set_ylabel("Feature")
+
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# The feature importance plot above shows that our engineered features (averaging features over past-weeks) contribute significantly to the model's prediction.
+# On the test leaderbord, the model achieved a MAE of 24.6, meaning predictions deviate from the true case count by roughly 24 cases per week on average.
+# As observed in Results, prediction errors widen considerably during peak outbreak seasons where extreme case spikes occur.
+# Consequently, the model should not be used to micromanage medical supply quotas or justify reducing baseline resource allocations.
+# Instead, it is best deployed as an early-warning system to ensure hospital surge readiness and improve public awareness.
