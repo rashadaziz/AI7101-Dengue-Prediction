@@ -2,7 +2,7 @@
 # # DengAI: Predicting Weekly Dengue Cases
 #
 # Predict weekly dengue cases in San Juan (`sj`) and Iquitos (`iq`) from weather data, so health teams can prepare early.
-# Metric: **MAE** (average number of cases we are off per week).
+# Metric: **MAE** (average number of cases we are off per week). It is easy to explain to health teams, and less dominated by the rare outbreak weeks (1.6) than RMSE.
 
 # %%
 import numpy as np
@@ -150,6 +150,7 @@ print(train.groupby("city")["total_cases"].describe().round(1))
 
 # %% [markdown]
 # ## 2. Preprocessing
+# - `city` is the only categorical variable: instead of one-hot encoding it, we train **one model per city**, because the cities differ in scale and peak week (1.1).
 # - Fill missing values with the previous week's value (1.2).
 # - Drop the duplicate precipitation column (1.2).
 # - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
