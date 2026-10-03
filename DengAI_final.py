@@ -135,12 +135,27 @@ plt.tight_layout(); plt.show()
 # Weeks inside a season move together, so we **validate on whole seasons, always later than the training data** (section 3), and Iquitos gets at least 5 training seasons before its first fold.
 
 # %% [markdown]
+# ### 1.6 Target distribution
+
+# %%
+sns.displot(train, x="total_cases", col="city", bins=50, height=4, aspect=1.6,
+            facet_kws={"sharex": False, "sharey": False})
+plt.show()
+
+print(train.groupby("city")["total_cases"].describe().round(1))
+
+# %% [markdown]
+# Weekly cases are strongly right-skewed in both cities: most weeks are low (median 19 in San Juan, 5 in Iquitos), but outbreak weeks reach 461 and 116, and 18% of Iquitos weeks have zero cases.
+# We **keep the raw counts** instead of a log transform: the competition scores MAE on raw counts, and XGBoost with `reg:absoluteerror` optimises that directly, predicting the median, which is not pulled up by the rare outbreak weeks.
+
+# %% [markdown]
 # ## 2. Preprocessing
 # - Fill missing values with the previous week's value (1.2).
 # - Drop the duplicate precipitation column (1.2).
 # - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
 # - Add the average of the `KEY` features over the last 4, 8 and 12 weeks (1.3, 1.4).
 # - Split into inputs `X` (all weather and season features) and output `y` (`total_cases`).
+# - Keep `total_cases` as raw counts, no transform (1.6).
 
 # %%
 train["part"], test["part"] = "train", "test"
