@@ -348,8 +348,9 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# The feature importance plot above shows that our engineered features (averaging features over past-weeks) contribute significantly to the model's prediction.
-# On the test leaderbord, the model achieved a MAE of 24.6, meaning predictions deviate from the true case count by roughly 24 cases per week on average.
-# As observed in Results, prediction errors widen considerably during peak outbreak seasons where extreme case spikes occur.
+# The feature importance plot shows that our engineered 4/8/12-week averages carry most of the model's importance (58% in San Juan, 50% in Iquitos), led by the 12-week dew point and minimum temperature.
+# These slow-moving averages mostly encode *when* the dengue season comes, the same information the seasonal baseline already has, which is why XGBoost only ties with it (section 5).
+# On the test leaderboard, the model achieved a MAE of 24.6, meaning predictions deviate from the true case count by roughly 25 cases per week on average.
+# As observed in Results, prediction errors widen considerably during peak outbreak seasons, where the model predicts at most about 70 cases while real peaks reach 170–330.
 # Consequently, the model should not be used to micromanage medical supply quotas or justify reducing baseline resource allocations.
-# Instead, it is best deployed as an early-warning system to ensure hospital surge readiness and improve public awareness.
+# Instead, it is best used to anticipate the timing of the yearly dengue season (staffing, mosquito-control campaigns, public awareness); it cannot warn about how large an outbreak will be.
