@@ -14,8 +14,9 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import mean_absolute_error
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.compose import TransformedTargetRegressor
 from xgboost import XGBRegressor
 
 sns.set()
@@ -202,8 +203,10 @@ def season_folds(n_rows, first):
 
 # %%
 MODELS = {
-    "Ridge": (make_pipeline(StandardScaler(), Ridge()),
-              {"ridge__alpha": [1, 10, 100, 1000, 10000]}),
+    "Lasso": (TransformedTargetRegressor(regressor=make_pipeline(StandardScaler(), Lasso(max_iter=10000, random_state=42)), func=np.log1p, inverse_func=np.expm1),
+              {"regressor__lasso__alpha": [0.001, 0.005, 0.01, 0.02]}),
+    "Ridge": (TransformedTargetRegressor(regressor=make_pipeline(StandardScaler(), Ridge(max_iter=10000,random_state=42)), func=np.log1p, inverse_func=np.expm1),
+              {"regressor__ridge__alpha": [1, 5, 10, 20]}),
     "Random Forest": (RandomForestRegressor(n_estimators=200, random_state=42),
                       {"max_depth": [3, 5, None], "min_samples_leaf": [1, 5, 20]}),
     "XGBoost": (XGBRegressor(objective="reg:absoluteerror", learning_rate=0.05, random_state=42),
