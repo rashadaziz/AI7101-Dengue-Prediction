@@ -155,7 +155,7 @@ print(train.groupby("city")["total_cases"].describe().round(1))
 # - Drop the duplicate precipitation column (1.2).
 # - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
 # - Add the average of the `KEY` features over the last 4, 8 and 12 weeks (1.3, 1.4).
-# - Split into inputs `X` (all weather and season features) and output `y` (`total_cases`).
+# - Split into inputs `X` (the 5 `KEY` features, their 15 window averages and the 2 season features) and output `y` (`total_cases`).
 # - Keep `total_cases` as raw counts, no transform (1.6).
 
 # %%
@@ -173,7 +173,7 @@ for w in [4, 8, 12]:
     for c in KEY:
         data[f"{c}_{w}w"] = data.groupby("city")[c].transform(lambda s: s.rolling(w, min_periods=1).mean())
 
-FEATURES = [c for c in data.columns if c not in ["city", "year", "weekofyear", "week_start_date", "total_cases", "part"]]
+FEATURES = KEY + [f"{c}_{w}w" for w in [4, 8, 12] for c in KEY] + ["woy_sin", "woy_cos"] # 22 features
 X = data[FEATURES]          # inputs
 y = data["total_cases"]     # output (NaN for test rows)
 print(len(FEATURES), "features")
@@ -298,14 +298,20 @@ for city in ["sj", "iq"]:
     d_train = data[(data.city == city) & (data.part == "train")]
     d_test = data[(data.city == city) & (data.part == "test")]
 
-    model, grid = MODELS[FINAL[city]]
-    gs = GridSearchCV(model, grid, cv=list(season_folds(len(d_train), MIN_TRAIN[city])), scoring="neg_mean_absolute_error")
-    gs.fit(X.loc[d_train.index], y.loc[d_train.index])
-    print(city, gs.best_params_)
+    if FINAL[city] == "Baseline":
+        # median cases of the same week over all training seasons (no weather, nothing to tune)
+        wk_median = d_train.groupby("weekofyear")["total_cases"].median()
+        pred = d_test["weekofyear"].map(wk_median).fillna(d_train["total_cases"].median()).values
+        print(city, "Baseline")
+    else:
+        model, grid = MODELS[FINAL[city]]
+        gs = GridSearchCV(model, grid, cv=list(season_folds(len(d_train), MIN_TRAIN[city])), scoring="neg_mean_absolute_error")
+        gs.fit(X.loc[d_train.index], y.loc[d_train.index])
+        print(city, gs.best_params_)
+        city_model[city] = gs.best_estimator_
+        pred = gs.predict(X.loc[d_test.index]).clip(0)
 
-    city_model[city] = gs.best_estimator_
-    parts.append(d_test[["city", "year", "weekofyear"]].assign(
-        total_cases=np.round(gs.predict(X.loc[d_test.index]).clip(0)).astype(int)))
+    parts.append(d_test[["city", "year", "weekofyear"]].assign(total_cases=np.round(pred).astype(int)))
 
 submission = pd.concat(parts)
 submission.to_csv("submission.csv", index=False)
@@ -318,8 +324,9 @@ submission.groupby("city").total_cases.describe()
 # ## 7. Post analysis
 
 # %%
-cities = ["sj", "iq"]
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+cities = list(city_model)  # only cities with an ML model (the baseline has no features)
+fig, axes = plt.subplots(1, len(cities), figsize=(8 * len(cities), 6), squeeze=False)
+axes = axes[0]
 
 for ax, city in zip(axes, cities):
     estimator = city_model[city]
@@ -354,3 +361,4 @@ plt.show()
 # As observed in Results, prediction errors widen considerably during peak outbreak seasons, where the model predicts at most about 70 cases while real peaks reach 170–330.
 # Consequently, the model should not be used to micromanage medical supply quotas or justify reducing baseline resource allocations.
 # Instead, it is best used to anticipate the timing of the yearly dengue season (staffing, mosquito-control campaigns, public awareness); it cannot warn about how large an outbreak will be.
+# %%
