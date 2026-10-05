@@ -147,7 +147,7 @@ print(train.groupby("city")["total_cases"].describe().round(1))
 
 # %% [markdown]
 # Weekly cases are strongly right-skewed in both cities: most weeks are low (median 19 in San Juan, 5 in Iquitos), but outbreak weeks reach 461 and 116, and 18% of Iquitos weeks have zero cases.
-# We **keep the raw counts** instead of a log transform: the competition scores MAE on raw counts, and XGBoost with `reg:absoluteerror` optimises that directly, predicting the median, which is not pulled up by the rare outbreak weeks.The linear models (Ridge, Lasso) are trained on log(cases + 1) because they can't handle the skew, and their predictions are converted back to counts before scoring.
+# We **keep the raw counts** instead of a log transform: the competition scores MAE on raw counts, and XGBoost with `reg:absoluteerror` optimises that directly, predicting the median, which is not pulled up by the rare outbreak weeks. The linear models (Ridge, Lasso) are trained on log(cases + 1) because they can't handle the skew, and their predictions are converted back to counts before scoring.
 
 # %% [markdown]
 # ## 2. Preprocessing
@@ -357,6 +357,10 @@ for ax, city in zip(axes, cities):
 plt.tight_layout()
 plt.show()
 
+# %%
+{c: round(100 * sum(i for f, i in zip(FEATURES, m.feature_importances_) if f.endswith("w")), 1)
+ for c, m in city_model.items()}
+# %%
 # %% [markdown]
 # The feature importance plot shows that our engineered 4/8/12-week averages carry most of the model's importance (73.9% in San Juan, 74.2% in Iquitos), led by the 12-week dew point.
 # These slow-moving averages mostly encode when the dengue season comes, the same information the seasonal baseline already has, which is why XGBoost cannot clearly beat it (section 5).
