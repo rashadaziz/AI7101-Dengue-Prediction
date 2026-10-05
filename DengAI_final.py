@@ -147,7 +147,7 @@ print(train.groupby("city")["total_cases"].describe().round(1))
 
 # %% [markdown]
 # Weekly cases are strongly right-skewed in both cities: most weeks are low (median 19 in San Juan, 5 in Iquitos), but outbreak weeks reach 461 and 116, and 18% of Iquitos weeks have zero cases.
-# We **keep the raw counts** instead of a log transform: the competition scores MAE on raw counts, and XGBoost with `reg:absoluteerror` optimises that directly, predicting the median, which is not pulled up by the rare outbreak weeks.
+# We **keep the raw counts** instead of a log transform: the competition scores MAE on raw counts, and XGBoost with `reg:absoluteerror` optimises that directly, predicting the median, which is not pulled up by the rare outbreak weeks.The linear models (Ridge, Lasso) are trained on log(cases + 1) because they can't handle the skew, and their predictions are converted back to counts before scoring.
 
 # %% [markdown]
 # ## 2. Preprocessing
@@ -157,7 +157,7 @@ print(train.groupby("city")["total_cases"].describe().round(1))
 # - Add season features (`sin`/`cos` of the week) (1.1): week of year is cyclical, week 52 is next to week 1. Encoding it with sine and cosine puts the weeks on a circle, so the model sees the seasons as continuous, which matters because Iquitos's dengue season crosses the new year.
 # - Add the average of the `KEY` features over the last 4, 8 and 12 weeks (1.3, 1.4).
 # - Split into inputs `X` (the 5 `KEY` features, their 15 window averages and the 2 season features) and output `y` (`total_cases`).
-# - Keep `total_cases` as raw counts, no transform (1.6).
+# - Keep total_cases as raw counts (1.6). Only Ridge and Lasso use log(cases + 1) internally, and their predictions are converted back to counts.
 
 # %%
 train["part"], test["part"] = "train", "test"
@@ -195,12 +195,12 @@ def season_folds(n_rows, first):
 
 # %% [markdown]
 # ## 4. Model choosing
-# Three models plus a baseline, each scored on every outer season (the models are tuned in the inner loop):
-# - **Ridge** (simple linear model)
-# - **Random Forest**
-# - **XGBoost** (gradient boosting, optimising MAE directly)
-# - **Baseline**: median cases of the same week of the year in the training seasons (no weather). A model is only useful if it beats this.
-
+# Four models plus a baseline, each scored on every outer season (the models are tuned in the inner loop):
+# - Ridge (linear model that keeps weights small, trained on log(cases + 1))
+# - Lasso (linear model that pushes weak weights to zero, trained on log(cases + 1))
+# - Random Forest
+# - XGBoost (gradient boosting, optimising MAE directly)
+# - Baseline: median cases of the same week of the year in the training seasons (no weather). A model is only useful if it beats this.
 # %%
 MODELS = {
     "Lasso": (TransformedTargetRegressor(regressor=make_pipeline(StandardScaler(), Lasso(max_iter=10000, random_state=42)), func=np.log1p, inverse_func=np.expm1),
@@ -267,7 +267,7 @@ choice = pd.DataFrame(table).set_index(["city", "model"]).sort_values(["city", "
 choice.round(2)
 
 # %% [markdown]
-# XGBoost is the best ML model in both cities, but it only ties with the seasonal baseline (sj 20.1 vs 19.8, iq 6.0 vs 6.2): most of the predictable signal is seasonality, and weather helps mainly in some outbreak seasons (e.g. sj 2005: 17.9 vs 23.5). We keep XGBoost as the final model.
+# XGBoost is the best ML model in both cities. It ties the seasonal baseline in Iquitos (5.8 vs 6.2) and is about 1 case/week behind it in San Juan (21.0 vs 19.8), while winning more San Juan seasons (3 vs 2). Most of the predictable signal is seasonality, and weather helps mainly in some outbreak seasons (e.g. sj 2005: 19.3 vs 23.5). We keep XGBoost as the final model.
 
 # %%
 FINAL = {"sj": "XGBoost", "iq": "XGBoost"}  # set from the table above
@@ -287,8 +287,8 @@ for ax, city in zip(axes, ["sj", "iq"]):
 plt.tight_layout(); plt.show()
 
 # %% [markdown]
-# In normal seasons XGBoost follows the timing of the cases, but it never predicts outbreaks: its highest San Juan prediction is about 70 cases, while the real peaks were 329 (1998), 137 (2005) and 170 (2007), and in Iquitos it predicts about 10 when the peaks were 58 and 63.
-# The baseline has the same ceiling, which is why the two tie: weather tells the model *when* the season comes, not *how big* it will be.
+# In normal seasons XGBoost follows the timing of the cases, but it never predicts outbreaks: its highest San Juan prediction is about 100 cases (a single spike in 2007, usually ≤ 70), while the real peaks were 329 (1998), 137 (2005) and 170 (2007), and in Iquitos it predicts at most about 14 when the peaks were 58 and 63.
+# The baseline has the same ceiling, which is why XGBoost cannot clearly beat it: weather tells the model when the season comes, not how big it will be.
 
 # %% [markdown]
 # ## 6. Training (final model)
@@ -321,7 +321,7 @@ submission.to_csv("submission.csv", index=False)
 submission.groupby("city").total_cases.describe()
 
 # %% [markdown]
-# Both cities pick the simplest XGBoost in the grid (`max_depth=2`, 100 trees; CV MAE 20.0 in San Juan, 5.9 in Iquitos): with little signal beyond seasonality, bigger trees only fit noise.
+# San Juan picks max_depth=3 and Iquitos max_depth=4, both with 100 trees: shallow trees are enough because there is little signal beyond seasonality.
 
 # %% [markdown]
 # ## 7. Post analysis
@@ -358,10 +358,9 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# The feature importance plot shows that our engineered 4/8/12-week averages carry most of the model's importance (58% in San Juan, 50% in Iquitos), led by the 12-week dew point and minimum temperature.
-# These slow-moving averages mostly encode *when* the dengue season comes, the same information the seasonal baseline already has, which is why XGBoost only ties with it (section 5).
-# On the test leaderboard, the model achieved a MAE of 23.8, meaning predictions deviate from the true case count by roughly 25 cases per week on average.
-# As observed in Results, prediction errors widen considerably during peak outbreak seasons, where the model predicts at most about 70 cases while real peaks reach 170–330.
+# The feature importance plot shows that our engineered 4/8/12-week averages carry most of the model's importance (73.9% in San Juan, 74.2% in Iquitos), led by the 12-week dew point.
+# These slow-moving averages mostly encode when the dengue season comes, the same information the seasonal baseline already has, which is why XGBoost cannot clearly beat it (section 5).
+# On the test leaderboard, the model achieved a MAE of 23.8, meaning predictions deviate from the true case count by roughly 24 cases per week on average.
+# As observed in Results, prediction errors widen considerably during peak outbreak seasons, where the model predicts at most about 100 cases while real peaks reach 137–329.
 # Consequently, the model should not be used to micromanage medical supply quotas or justify reducing baseline resource allocations.
 # Instead, it is best used to anticipate the timing of the yearly dengue season (staffing, mosquito-control campaigns, public awareness); it cannot warn about how large an outbreak will be.
-# %%
